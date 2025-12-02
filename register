@@ -1,0 +1,548 @@
+import discord
+from discord import app_commands, ui
+from discord.ext import commands
+import json
+import os
+import datetime
+
+# --- CONFIGURATION ---
+TOKEN = 'putthetoken'
+DATA_FILE = "inferno_db.json"
+
+# --- DATABASE MANAGER ---
+def load_data():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except: return {}
+    return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def parse_die(die_str):
+    try:
+        return int(str(die_str).lower().replace('d', ''))
+    except:
+        return 4
+    
+# --- PLAYER ID GENERATOR ---
+import random
+
+def generate_player_id(char_type):
+    prefix = "PS" if char_type == "Public Safety" else "CIV"
+    num = random.randint(1000, 9999)
+    return f"{prefix}-{num}"
+
+# --- BOT SETUP ---
+class InfernoBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='!', intents=discord.Intents.all())
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("✅ System Ready: Select Faction -> Register")
+
+    async def on_ready(self):
+        print(f"🔥 {self.user} is Ready.")
+
+bot = InfernoBot()
+
+# ==============================================================================
+# 🔘 STEP 1: ปุ่มเลือกสังกัด (FACTION SELECTION)
+# ==============================================================================
+class RegisterTypeView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="👮 เจ้าหน้าที่ทางการ (Public Safety)", style=discord.ButtonStyle.danger, emoji="🪪")
+    async def hunter_btn(self, interaction: discord.Interaction, button: ui.Button):
+        # ถ้ากดปุ่มแดง -> ส่งแบบฟอร์มเจ้าหน้าที่
+        await interaction.response.send_modal(HunterModal())
+
+    @ui.button(label="🏘️ พลเรือน / เอกชน (Civilian/Private)", style=discord.ButtonStyle.secondary, emoji="🏠")
+    async def civilian_btn(self, interaction: discord.Interaction, button: ui.Button):
+        # ถ้ากดปุ่มเทา -> ส่งแบบฟอร์มพลเรือน
+        await interaction.response.send_modal(CivilianModal())
+
+# ==============================================================================
+# 📝 STEP 2: แบบฟอร์มกรอกข้อมูล (MODALS) - แก้ไขช่อง Doc Link
+# ==============================================================================
+
+# แบบฟอร์ม A: สำหรับเจ้าหน้าที่ (มีช่อง Rank)
+class HunterModal(ui.Modal, title="ใบสมัคร: แผนกความปลอดภัยสาธารณะ"):
+    name_age = ui.TextInput(
+        label="ชื่อ และ อายุ (Name / Age)",
+        placeholder="เช่น: Aki Hayakawa / 20",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    gender = ui.TextInput(
+        label="เพศ (Gender)",
+        placeholder="เช่น: Male",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # จุดสำคัญ: ช่องนี้คือ Rank
+    rank = ui.TextInput(
+        label="ระดับเจ้าหน้าที่ (Rank)",
+        placeholder="เช่น:  C, Special Division 4",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # --- [แก้ไข] เปลี่ยนจาก Details เป็น Doc Link ---
+    doc_link = ui.TextInput(
+        label="ใส่ลิ้งดอค (Doc Link)",
+        placeholder="https://docs.google.com/...",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # ---------------------------------------------
+    image_url = ui.TextInput(
+        label="ลิงก์รูปภาพ (Image URL)",
+        placeholder="https://... (ไม่บังคับ)",
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # ส่งข้อมูลไปประมวลผลต่อ (ระบุ type="Public Safety")
+        await process_registration(interaction, self, "Public Safety", self.rank.value)
+
+# แบบฟอร์ม B: สำหรับพลเรือน (เปลี่ยน Rank เป็น Occupation)
+class CivilianModal(ui.Modal, title="ใบสมัคร: พลเรือน/เอกชน"):
+    name_age = ui.TextInput(
+        label="ชื่อ และ อายุ (Name / Age)",
+        placeholder="เช่น: Asa Mitaka / 17",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    gender = ui.TextInput(
+        label="เพศ (Gender)",
+        placeholder="เช่น: Female",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # จุดสำคัญ: ช่องนี้คือ อาชีพ
+    occupation = ui.TextInput(
+        label="อาชีพ (Occupation)",
+        placeholder="เช่น: นักเรียน, พนักงานร้านสะดวกซื้อ, นักล่าเอกชน",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # --- [แก้ไข] เปลี่ยนจาก Details เป็น Doc Link ---
+    doc_link = ui.TextInput(
+        label="ใส่ลิ้งดอค (Doc Link)",
+        placeholder="https://docs.google.com/...",
+        style=discord.TextStyle.short,
+        required=True
+    )
+    # ---------------------------------------------
+    image_url = ui.TextInput(
+        label="ลิงก์รูปภาพ (Image URL)",
+        placeholder="https://... (ไม่บังคับ)",
+        required=False
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # ส่งข้อมูลไปประมวลผลต่อ (ระบุ type="Civilian" และส่งอาชีพไปแทน Rank)
+        await process_registration(interaction, self, "Civilian", f"Civ: {self.occupation.value}")
+
+# ฟังก์ชันกลางสำหรับรวบรวมข้อมูล
+async def process_registration(interaction, modal, char_type, rank_or_job):
+    # แยกชื่อกับอายุ
+    if "/" in modal.name_age.value:
+        parts = modal.name_age.value.split("/")
+        c_name = parts[0].strip()
+        c_age = parts[1].strip() if len(parts) > 1 else "-"
+    else:
+        c_name = modal.name_age.value
+        c_age = "-"
+
+    # รวบรวมข้อมูลไว้ชั่วคราว
+    temp_data = {
+        "name": c_name, 
+        "age": c_age,
+        "gender": modal.gender.value,
+        "rank": rank_or_job,            # ค่า Rank หรือ อาชีพ ที่ส่งมา
+        "identity": modal.doc_link.value, # [แก้ไข] เก็บ Link Doc ลงในช่อง identity
+        "image": modal.image_url.value,
+        "type": char_type               # ประเภทตัวละคร
+    }
+    
+    # ไปสู่ขั้นตอนเลือก Stat
+    await interaction.response.send_message(
+        content=f"📝 รับข้อมูล **{char_type}: {c_name}** เรียบร้อย...\nขั้นตอนต่อไป: **โปรดระบุขีดความสามารถ (Stats)**",
+        view=StatSelectionView(temp_data),
+        ephemeral=True
+    )
+
+# ==============================================================================
+# 📝 STEP 2: แบบฟอร์มกรอกข้อมูล (MODALS)
+# ==============================================================================
+
+class HunterModal(ui.Modal, title="ใบสมัคร: แผนกความปลอดภัยสาธารณะ"):
+    name_age = ui.TextInput(label="ชื่อ และ อายุ (Name / Age)", placeholder="เช่น: Aki Hayakawa / 20", style=discord.TextStyle.short, required=True)
+    gender = ui.TextInput(label="เพศ (Gender)", placeholder="เช่น: Male", style=discord.TextStyle.short, required=True)
+    rank = ui.TextInput(label="ระดับเจ้าหน้าที่ (Rank)", placeholder="เช่น: Rank C, Special Division 4", style=discord.TextStyle.short, required=True)
+    doc_link = ui.TextInput(label="ใส่ลิ้งดอค (Doc Link)", placeholder="https://docs.google.com/...", style=discord.TextStyle.short, required=True)
+    image_url = ui.TextInput(label="ลิงก์รูปภาพ (Image URL)", placeholder="https://... (ไม่บังคับ)", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await process_registration(interaction, self, "Public Safety", self.rank.value)
+
+class CivilianModal(ui.Modal, title="ใบสมัคร: พลเรือน/เอกชน"):
+    name_age = ui.TextInput(label="ชื่อ และ อายุ (Name / Age)", placeholder="เช่น: Asa Mitaka / 17", style=discord.TextStyle.short, required=True)
+    gender = ui.TextInput(label="เพศ (Gender)", placeholder="เช่น: Female", style=discord.TextStyle.short, required=True)
+    occupation = ui.TextInput(label="อาชีพ (Occupation)", placeholder="เช่น: นักเรียน, พนักงานร้านสะดวกซื้อ", style=discord.TextStyle.short, required=True)
+    doc_link = ui.TextInput(label="ใส่ลิ้งดอค (Doc Link)", placeholder="https://docs.google.com/...", style=discord.TextStyle.short, required=True)
+    image_url = ui.TextInput(label="ลิงก์รูปภาพ (Image URL)", placeholder="https://... (ไม่บังคับ)", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await process_registration(interaction, self, "Civilian", f"Civ: {self.occupation.value}")
+
+async def process_registration(interaction, modal, char_type, rank_or_job):
+    # แยกชื่อ/อายุ
+    if "/" in modal.name_age.value:
+        parts = modal.name_age.value.split("/")
+        c_name = parts[0].strip()
+        c_age = parts[1].strip() if len(parts) > 1 else "-"
+    else:
+        c_name = modal.name_age.value
+        c_age = "-"
+
+    temp_data = {
+        "name": c_name, "age": c_age,
+        "gender": modal.gender.value,
+        "rank": rank_or_job,
+        "identity": modal.doc_link.value,
+        "image": modal.image_url.value,
+        "type": char_type
+    }
+    
+    # ส่งไปหน้าเลือก Species ก่อน (Step 3.1)
+    await interaction.response.send_message(
+        content=f"📝 บันทึกข้อมูลเบื้องต้นเรียบร้อย...\nขั้นตอนต่อไป: **เลือกเผ่าพันธุ์ (Select Species)**",
+        view=SpeciesSelectionView(temp_data),
+        ephemeral=True
+    )
+
+# ======================================================================
+# 🔰 STEP 3.0 — เลือกหน่วย (UNIT SELECTION)
+# ======================================================================
+class UnitSelectionView(ui.View):
+    def __init__(self, char_data):
+        super().__init__(timeout=300)
+        self.char_data = char_data
+        self.selected_unit = None
+
+    unit_options = [
+        discord.SelectOption(label="Special Division 4", value="Special Division 4", description="หน่วยพิเศษปราบปีศาจ"),
+        discord.SelectOption(label="Field Response Team", value="Field Response Team", description="หน่วยตอบสนองภาคสนาม"),
+        discord.SelectOption(label="Intelligence Unit", value="Intelligence Unit", description="หน่วยข่าวกรอง"),
+        discord.SelectOption(label="Support & Logistics", value="Support & Logistics", description="หน่วยสนับสนุน"),
+        discord.SelectOption(label="Medical Team", value="Medical Team", description="หน่วยแพทย์")
+    ]
+
+    @ui.select(placeholder="เลือกหน่วยที่สังกัด...", options=unit_options)
+    async def select_unit(self, interaction: discord.Interaction, select: ui.Select):
+        self.selected_unit = select.values[0]
+        select.placeholder = f"เลือกแล้ว: {self.selected_unit}"
+        self.next_btn.disabled = False
+        await interaction.response.edit_message(view=self)
+
+    @ui.button(label="ถัดไป (Next)", style=discord.ButtonStyle.primary, disabled=True)
+    async def next_btn(self, interaction: discord.Interaction, button: ui.Button):
+        self.char_data["unit"] = self.selected_unit
+        await interaction.response.edit_message(
+            content=f"🧬 เลือกหน่วย: **{self.selected_unit}**\nขั้นตอนต่อไป: **เลือกเผ่าพันธุ์ (Species)**",
+            view=SpeciesSelectionView(self.char_data)
+        )
+
+# ==============================================================================
+# 🧬 STEP 3.1: เลือกเผ่าพันธุ์ (จำกัดสิทธิ์ Hybrid/Devil)
+# ==============================================================================
+class SpeciesSelectionView(ui.View):
+    def __init__(self, char_data):
+        super().__init__(timeout=300)
+        self.char_data = char_data
+        self.selected_species = None
+
+    # --- [UPDATED] ลบ Hybrid และ Devil ออกจากลิสต์สมัครปกติ ---
+    species_options = [
+        discord.SelectOption(label="👤 มนุษย์ (Human)", value="Human", description="ร่างกายปกติ, ทำสัญญาปีศาจได้"),
+        discord.SelectOption(label="👹 มนุษย์มาร (Fiend)", value="Fiend", description="ฟื้นฟูด้วยเลือด, ทำสัญญาไม่ได้"),
+    ]
+
+    @ui.select(placeholder="🧬 กรุณาเลือกเผ่าพันธุ์...", options=species_options, row=0)
+    async def select_species(self, interaction: discord.Interaction, select: ui.Select):
+        self.selected_species = select.values[0]
+        select.placeholder = f"✅ เผ่าพันธุ์: {self.selected_species}"
+        self.next_btn.disabled = False
+        await interaction.response.edit_message(view=self)
+
+    @ui.button(label="ถัดไป (Next) ➡️", style=discord.ButtonStyle.primary, row=1, disabled=True)
+    async def next_btn(self, interaction: discord.Interaction, button: ui.Button):
+        self.char_data["species"] = self.selected_species
+        await interaction.response.edit_message(
+            content=f"✅ เลือกเผ่า: **{self.selected_species}**\nขั้นตอนสุดท้าย: **กำหนดค่าพลัง (Attributes)**",
+            view=StatSelectionView(self.char_data)
+        )
+
+# ==============================================================================
+# 📊 STEP 3.2: เลือกค่าพลัง (STAT SELECTION VIEW)
+# ==============================================================================
+class StatSelectionView(ui.View):
+    def __init__(self, char_data):
+        super().__init__(timeout=300)
+        self.char_data = char_data
+        self.selections = {"STR": None, "DEX": None, "WILL": None, "INS": None}
+    
+    dice_options = [
+        discord.SelectOption(label="d4 (Weak)", value="d4"),
+        discord.SelectOption(label="d6 (Average)", value="d6"),
+        discord.SelectOption(label="d8 (Skilled)", value="d8"),
+        discord.SelectOption(label="d10 (Elite)", value="d10"),
+        discord.SelectOption(label="d12 (Master)", value="d12"),
+        discord.SelectOption(label="d20 (Legendary)", value="d20"),
+    ]
+
+    def check_complete(self):
+        if all(v is not None for v in self.selections.values()):
+            self.confirm_btn.disabled = False
+        else:
+            self.confirm_btn.disabled = True
+
+    @ui.select(placeholder="💪 ค่า Strength (ความแข็งแกร่ง)", options=dice_options, row=0)
+    async def s_str(self, interaction: discord.Interaction, select: ui.Select):
+        val = select.values[0]; self.selections["STR"] = val; select.placeholder = f"✅ Strength: {val}"
+        self.check_complete(); await interaction.response.edit_message(view=self)
+
+    @ui.select(placeholder="🏃 ค่า Dexterity (ความคล่องแคล่ว)", options=dice_options, row=1)
+    async def s_dex(self, interaction: discord.Interaction, select: ui.Select):
+        val = select.values[0]; self.selections["DEX"] = val; select.placeholder = f"✅ Dexterity: {val}"
+        self.check_complete(); await interaction.response.edit_message(view=self)
+
+    @ui.select(placeholder="🔥 ค่า Willpower (พลังใจ)", options=dice_options, row=2)
+    async def s_will(self, interaction: discord.Interaction, select: ui.Select):
+        val = select.values[0]; self.selections["WILL"] = val; select.placeholder = f"✅ Willpower: {val}"
+        self.check_complete(); await interaction.response.edit_message(view=self)
+
+    @ui.select(placeholder="👁️ ค่า Insight (ปัญญา/ไหวพริบ)", options=dice_options, row=3)
+    async def s_ins(self, interaction: discord.Interaction, select: ui.Select):
+        val = select.values[0]; self.selections["INS"] = val; select.placeholder = f"✅ Insight: {val}"
+        self.check_complete(); await interaction.response.edit_message(view=self)
+
+    @ui.button(label="ยืนยันการลงทะเบียน (Confirm)", style=discord.ButtonStyle.success, row=4, disabled=True)
+    async def confirm_btn(self, interaction: discord.Interaction, button: ui.Button):
+        data = load_data(); uid = str(interaction.user.id)
+        if uid in data and not data[uid].get('meta', {}).get('is_dead', False):
+             await interaction.response.send_message("❌ คุณมีตัวละครอยู่แล้ว", ephemeral=True); return
+
+        vals = {k: parse_die(v) for k, v in self.selections.items()}
+        max_hp = vals["STR"] + vals["WILL"]
+        def_val = vals["DEX"] + vals["WILL"]
+        m_def_val = vals["INS"] + vals["WILL"]
+
+        new_char = {
+            "info": {
+                "name": self.char_data["name"], "age": self.char_data["age"],
+                "gender": self.char_data["gender"], "rank": self.char_data["rank"],
+                "species": self.char_data["species"], 
+                "image": self.char_data["image"], "type": self.char_data["type"]
+            },
+            "roleplay": {"identity": self.char_data["identity"], "bond": "-", "contracts": []},
+            "stats": self.selections, "values": vals,
+            "combat": {"hp": max_hp, "max_hp": max_hp, "def": def_val, "m_def": m_def_val, "sp": 5, "conditions": []},
+            "inventory": [], "money": 1000,
+            "meta": {"is_dead": False, "exp": 0, "created_at": str(datetime.date.today()), "discord_id": uid}
+        }
+        data[uid] = new_char; save_data(data)
+
+        # Profile Card
+        color = 0x8b0000 if self.char_data["type"] == "Public Safety" else 0x3498db
+        embed = discord.Embed(title=f"🗂️ PERSONNEL FILE: {new_char['info']['name']}", color=color)
+        info = f"**Rank:** {new_char['info']['rank']}\n**Species:** {new_char['info']['species']}\n**Age:** {new_char['info']['age']} | **Gender:** {new_char['info']['gender']}"
+        embed.add_field(name="📋 INFO", value=info, inline=False)
+        embed.add_field(name="📂 DOSSIER LINK", value=f"[Click to Open Document]({new_char['roleplay']['identity']})", inline=False)
+        stats = f"💪STR:{self.selections['STR']} 🏃DEX:{self.selections['DEX']} 🔥WILL:{self.selections['WILL']} 👁️INS:{self.selections['INS']}"
+        combat = f"❤️HP: {max_hp} | 🛡️DEF: {def_val} | 🔮M.DEF: {m_def_val}"
+        embed.add_field(name="📊 STATS", value=stats, inline=False)
+        embed.add_field(name="⚔️ COMBAT", value=combat, inline=False)
+        if new_char['info']['image']: embed.set_image(url=new_char['info']['image'])
+        embed.set_footer(text=f"Affiliation: {self.char_data['type']} | Balance: 1,000¥")
+
+        await interaction.response.edit_message(content="✅ **ลงทะเบียนเสร็จสมบูรณ์**", embed=embed, view=None)
+
+# ==============================================================================
+# 🛠️ ADMIN TOOLS: MANAGE PLAYER & SET SPECIES
+# ==============================================================================
+
+# 1. Edit Info Modal (แก้ข้อมูลทั่วไป)
+class AdminEditInfoModal(ui.Modal, title="Admin: Edit Info"):
+    def __init__(self, target_id, current_data):
+        super().__init__()
+        self.target_id = target_id
+        self.current_data = current_data
+        
+        # Pre-fill data
+        self.char_name = ui.TextInput(label="Name", default=current_data['info']['name'], required=True)
+        self.char_age = ui.TextInput(label="Age", default=current_data['info']['age'], required=True)
+        self.char_rank = ui.TextInput(label="Rank", default=current_data['info']['rank'], required=True)
+        self.doc_link = ui.TextInput(label="Doc Link", default=current_data['roleplay']['identity'], required=True)
+        self.img_url = ui.TextInput(label="Image URL", default=current_data['info']['image'] or "", required=False)
+
+        self.add_item(self.char_name); self.add_item(self.char_age); self.add_item(self.char_rank)
+        self.add_item(self.doc_link); self.add_item(self.img_url)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        if self.target_id in data:
+            data[self.target_id]['info']['name'] = self.char_name.value
+            data[self.target_id]['info']['age'] = self.char_age.value
+            data[self.target_id]['info']['rank'] = self.char_rank.value
+            data[self.target_id]['roleplay']['identity'] = self.doc_link.value
+            data[self.target_id]['info']['image'] = self.img_url.value
+            save_data(data)
+            await interaction.response.send_message("✅ Updated Info!", ephemeral=True)
+
+# 2. Edit Vitals Modal (แก้ HP/SP/Money)
+class AdminEditVitalsModal(ui.Modal, title="Admin: Edit Vitals"):
+    def __init__(self, target_id, current_data):
+        super().__init__()
+        self.target_id = target_id
+        self.hp = ui.TextInput(label="Current HP", default=str(current_data['combat']['hp']))
+        self.max_hp = ui.TextInput(label="Max HP", default=str(current_data['combat']['max_hp']))
+        self.money = ui.TextInput(label="Money", default=str(current_data['money']))
+        self.sp = ui.TextInput(label="SP", default=str(current_data['combat']['sp']))
+        self.add_item(self.hp); self.add_item(self.max_hp); self.add_item(self.money); self.add_item(self.sp)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        if self.target_id in data:
+            try:
+                data[self.target_id]['combat']['hp'] = int(self.hp.value)
+                data[self.target_id]['combat']['max_hp'] = int(self.max_hp.value)
+                data[self.target_id]['money'] = int(self.money.value)
+                data[self.target_id]['combat']['sp'] = int(self.sp.value)
+                save_data(data)
+                await interaction.response.send_message("✅ Updated Vitals!", ephemeral=True)
+            except ValueError:
+                await interaction.response.send_message("❌ Error: Please enter numbers only.", ephemeral=True)
+
+# 3. Edit Stats Modal (แก้เต๋า)
+class AdminEditStatsModal(ui.Modal, title="Admin: Edit Stats"):
+    def __init__(self, target_id, current_data):
+        super().__init__()
+        self.target_id = target_id
+        self.str_stat = ui.TextInput(label="STR (e.g. d10)", default=current_data['stats']['STR'])
+        self.dex_stat = ui.TextInput(label="DEX (e.g. d6)", default=current_data['stats']['DEX'])
+        self.will_stat = ui.TextInput(label="WILL (e.g. d8)", default=current_data['stats']['WILL'])
+        self.ins_stat = ui.TextInput(label="INS (e.g. d4)", default=current_data['stats']['INS'])
+        self.add_item(self.str_stat); self.add_item(self.dex_stat); self.add_item(self.will_stat); self.add_item(self.ins_stat)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        if self.target_id in data:
+            stats = {"STR": self.str_stat.value, "DEX": self.dex_stat.value, "WILL": self.will_stat.value, "INS": self.ins_stat.value}
+            vals = {k: parse_die(v) for k, v in stats.items()}
+            
+            data[self.target_id]['stats'] = stats
+            data[self.target_id]['values'] = vals
+            # Recalculate derived
+            data[self.target_id]['combat']['def'] = vals['DEX'] + vals['WILL']
+            data[self.target_id]['combat']['m_def'] = vals['INS'] + vals['WILL']
+            
+            save_data(data)
+            await interaction.response.send_message("✅ Updated Stats & Derived Values!", ephemeral=True)
+
+# 4. Set Species View (เปลี่ยนเผ่า - รวมตัวลับ)
+class AdminSpeciesView(ui.View):
+    def __init__(self, target_id):
+        super().__init__()
+        self.target_id = target_id
+
+    # รวมทุกเผ่าไว้ที่นี่ให้ Admin เลือก
+    options = [
+        discord.SelectOption(label="👤 Human", value="Human"),
+        discord.SelectOption(label="👹 Fiend", value="Fiend"),
+        discord.SelectOption(label="⛓️ Hybrid (Admin Only)", value="Hybrid", description="แรร์มาก"),
+        discord.SelectOption(label="😈 Devil (Admin Only)", value="Devil", description="สำหรับอีเวนต์"),
+    ]
+
+    @ui.select(placeholder="🔧 Select New Species...", options=options)
+    async def select_species(self, interaction: discord.Interaction, select: ui.Select):
+        data = load_data()
+        if self.target_id in data:
+            data[self.target_id]['info']['species'] = select.values[0]
+            save_data(data)
+            await interaction.response.send_message(f"🧬 Changed species to **{select.values[0]}**", ephemeral=True)
+
+# 5. Main Admin Dashboard View
+class AdminPlayerView(ui.View):
+    def __init__(self, target_id, current_data):
+        super().__init__(timeout=None)
+        self.target_id = target_id
+        self.data = current_data
+
+    @ui.button(label="📝 Edit Info", style=discord.ButtonStyle.secondary, row=0)
+    async def edit_info(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AdminEditInfoModal(self.target_id, self.data))
+
+    @ui.button(label="📊 Edit Stats", style=discord.ButtonStyle.primary, row=0)
+    async def edit_stats(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AdminEditStatsModal(self.target_id, self.data))
+
+    @ui.button(label="❤️ Edit Vitals", style=discord.ButtonStyle.success, row=1)
+    async def edit_vitals(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(AdminEditVitalsModal(self.target_id, self.data))
+
+    @ui.button(label="🧬 Set Species", style=discord.ButtonStyle.primary, row=1)
+    async def set_species(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message("🧬 เลือกเผ่าพันธุ์ใหม่ (รวมเผ่าลับ):", view=AdminSpeciesView(self.target_id), ephemeral=True)
+
+    @ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger, row=2)
+    async def delete_char(self, interaction: discord.Interaction, button: ui.Button):
+        data = load_data()
+        if self.target_id in data:
+            del data[self.target_id]
+            save_data(data)
+            await interaction.response.edit_message(content="🗑️ **Deleted Character Successfully.**", embed=None, view=None)
+
+# ==============================================================================
+# 🎮 MAIN COMMANDS
+# ==============================================================================
+
+@bot.tree.command(name="register", description="ลงทะเบียนตัวละครใหม่")
+async def start_register(interaction: discord.Interaction):
+    data = load_data(); uid = str(interaction.user.id)
+    if uid in data and not data[uid].get('meta', {}).get('is_dead', False):
+        c_name = data[uid].get('info', {}).get('name', 'Unknown')
+        await interaction.response.send_message(f"⚠️ คุณมีตัวละคร **{c_name}** อยู่แล้ว", ephemeral=True); return
+    embed = discord.Embed(title="🗂️ ลงทะเบียนตัวละคร (Registration)", color=0x2b2d31)
+    embed.description = "กรุณาเลือกสังกัดของคุณ (Select Affiliation):"
+    await interaction.response.send_message(embed=embed, view=RegisterTypeView(), ephemeral=True)
+
+class AdminGroup(app_commands.Group):
+    def __init__(self): super().__init__(name="admin", description="GM Tools")
+    
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.guild_permissions.administrator: return True
+        await interaction.response.send_message("⛔ GM Only", ephemeral=True); return False
+
+    @app_commands.command(name="manage", description="จัดการข้อมูลผู้เล่น (Edit/Delete/Set Species)")
+    async def manage(self, interaction: discord.Interaction, target: discord.Member):
+        data = load_data(); uid = str(target.id)
+        if uid not in data:
+            await interaction.response.send_message("❌ ไม่พบข้อมูลตัวละครของผู้เล่นคนนี้", ephemeral=True); return
+
+        char = data[uid]
+        embed = discord.Embed(title=f"🔧 ADMIN DASHBOARD: {char['info']['name']}", color=0x2b2d31)
+        embed.description = f"**Species:** {char['info']['species']}\n**Rank:** {char['info']['rank']}\n**HP:** {char['combat']['hp']}/{char['combat']['max_hp']}"
+        embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
+        
+        await interaction.response.send_message(embed=embed, view=AdminPlayerView(uid, char), ephemeral=True)
+
+bot.tree.add_command(AdminGroup())
+bot.run(TOKEN)
